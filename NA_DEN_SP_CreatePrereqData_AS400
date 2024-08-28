@@ -1,0 +1,692 @@
+/*
+<Method Name>NA_DEN_SP_CreatePrereqData_AS400</Method Name>
+<Author>Rahul KOLHAR</Author>
+<Copyright>SteepGraph System Pvt. Ltd</Copyright>
+Purpose:
+Triggers: Schedular 
+*/
+ 
+Innovator inn=this.getInnovator();
+Item getGrantIdentity = inn.applyMethod("NA_DEN_SP_AccessGrantIdentity","");
+string getGrantAccess = getGrantIdentity.getResult();
+
+DateTime startTime;
+DateTime endTime;
+TimeSpan timeConsumed;
+
+CCO.Utilities.WriteDebug("NA_DEN_SP_CreatePrereqData_AS400", "creating dictionary");
+startTime = DateTime.Now;
+
+//Check For User Permission for getting departments
+Item department;
+Aras.Server.Security.Identity identityForGrantTemp = Aras.Server.Security.Identity.GetByName(getGrantAccess);
+bool permissionWasGrantedTemp = false;
+try
+{
+    permissionWasGrantedTemp = Aras.Server.Security.Permissions.GrantIdentity(identityForGrantTemp);
+    department=this.newItem("NA_DEN_SP_Department","get");
+    department=department.apply();
+}
+catch (Exception) 
+{
+    throw;
+} 
+finally
+{
+    if (permissionWasGrantedTemp) {
+        Aras.Server.Security.Permissions.RevokeIdentity(identityForGrantTemp);
+    }
+}
+ 
+//Getting connection string
+var connStringObject = this.apply("NA_DESP_GetConnectionStringToDW");
+string connectionString = connStringObject.getProperty("connectionString");
+// string connectionString=@"data Source=DESKTOP-R912CHS\MSSQLSERVERNEW; Initial Catalog=DENSOSalesPortalDev ; User ID=sa; Password=123";
+ 
+//Store All JDE Numbers with their End Customer
+//Getting teble Name
+Item tempVariable = inn.newItem("Variable", "get");
+tempVariable.setProperty("name", "NA_DEN_SP_VWSales_Customer");
+tempVariable = tempVariable.apply();
+string tempTableName = tempVariable.getProperty("value");
+ 
+Dictionary<string, string> JDENums_EndCust = new Dictionary<string, string>();
+Dictionary<string, string> ENDCustIDs = new Dictionary<string, string>();
+ 
+//First gets all END_Customer id's
+string strENDCustItems=@"Select na_den_sp_name,id From NA_DEN_SP_End_Customer";
+Item endCustItems=inn.applySQL(strENDCustItems);
+for(int i=0;i<endCustItems.getItemCount();i++)
+{
+    Item endCustItem=endCustItems.getItemByIndex(i);
+    string endCustItemID=endCustItem.getProperty("id");
+    string name=endCustItem.getProperty("na_den_sp_name");
+    if(!ENDCustIDs.ContainsKey(name) && !string.IsNullOrEmpty(name))
+    ENDCustIDs[name]=endCustItemID;
+}
+// return inn.newResult("ENDCustDict: "+ENDCustIDs.Count);
+
+//Create Dictionry which store JDE Number as a key and payment terms as values
+Dictionary<string, string> JDENumsPTs = new Dictionary<string, string>();
+ 
+using(System.Data.SqlClient.SqlConnection cnn = new System.Data.SqlClient.SqlConnection(connectionString)) 
+{
+    Aras.Server.Security.Identity identityForGrant = Aras.Server.Security.Identity.GetByName(getGrantAccess);
+    bool permissionWasGranted = false;
+    try
+    {
+        permissionWasGranted = Aras.Server.Security.Permissions.GrantIdentity(identityForGrant);
+        string updateListQuery=@"Select distinct JDE_Number,End_Customer,Payment_Terms from "+tempTableName+"";
+        var dataAdapterForList = new System.Data.SqlClient.SqlDataAdapter(updateListQuery, cnn);
+        var datasetForList = new DataSet();
+        dataAdapterForList.Fill(datasetForList,"vwSales_Customer");
+        var datatableForList = datasetForList.Tables["vwSales_Customer"];
+        //Traverse through data
+        if(datatableForList.Rows.Count!=0)
+        {
+            foreach (DataRow row in datatableForList.Rows)
+            {
+                string JDENumber=row["JDE_Number"].ToString();
+                string EndCustomer=row["End_Customer"].ToString();
+                if(EndCustomer!="")
+                {
+                    if(ENDCustIDs.ContainsKey(EndCustomer))
+                    {
+                        //JDENums_EndCust[JDENumber]=ENDCustIDs[EndCustomer];
+                        JDENums_EndCust[JDENumber]=EndCustomer;
+                    }
+                    else
+                    {
+                        Item newENDCust=inn.newItem("NA_DEN_SP_End_Customer","add");
+                        newENDCust.setProperty("na_den_sp_name",EndCustomer);
+                        newENDCust=newENDCust.apply();
+                        if(newENDCust.getItemCount()==1)
+                        {
+                            string newENDCustID=newENDCust.getProperty("id");
+                            ENDCustIDs[EndCustomer]=newENDCustID;
+                            // JDENums_EndCust[JDENumber]=newENDCustID;
+                            JDENums_EndCust[JDENumber]=EndCustomer;
+                        }
+                    }
+                }
+                
+                //Store Payment Terms
+                string paymentTerms=row["Payment_Terms"].ToString();
+                if(!string.IsNullOrEmpty(paymentTerms) && !string.IsNullOrEmpty(JDENumber) && !JDENumsPTs.ContainsKey(JDENumber))
+                {
+                    JDENumsPTs.Add(JDENumber,paymentTerms);
+                }
+            }
+        }
+    }
+    catch (Exception) 
+    {
+        throw;
+    } 
+    finally
+    {
+        if (permissionWasGranted) {
+            Aras.Server.Security.Permissions.RevokeIdentity(identityForGrant);
+        }
+    }
+}
+ 
+//Getting Table name
+Item variable = inn.newItem("Variable", "get");
+variable.setProperty("name", "NA_DEN_SP_VWSales_ShipTo");
+variable = variable.apply();
+string targetTableName = variable.getProperty("value");
+ 
+//Updating Bus Type List
+List<string> busTypesList=new List<string>();
+ 
+//Storing CustmerNames in dictionary with ID
+string getCustomers=@"Select na_den_sp_customername,id from NA_DEN_SP_CustomerName";
+Item customerItms=inn.applySQL(getCustomers);
+Dictionary<string, string> customerNamesList = new Dictionary<string, string>();
+for(int i=0;i<customerItms.getItemCount();i++)
+{
+    if(!customerNamesList.ContainsKey(customerItms.getItemByIndex(i).getProperty("na_den_sp_customername")))
+    customerNamesList.Add(customerItms.getItemByIndex(i).getProperty("na_den_sp_customername"),customerItms.getItemByIndex(i).getProperty("id"));
+}
+ 
+//Storing JDE Numbers in dictionary with ID 
+string getJDENumbers=@"Select na_den_sp_jde_number,id from NA_DEN_SP_Customer_JDE";
+Item JDENumItms=inn.applySQL(getJDENumbers);
+Dictionary<string, string> JDENumsList = new Dictionary<string, string>();
+for(int i=0;i<JDENumItms.getItemCount();i++)
+{
+    if(!JDENumsList.ContainsKey(JDENumItms.getItemByIndex(i).getProperty("na_den_sp_jde_number")))
+    JDENumsList.Add(JDENumItms.getItemByIndex(i).getProperty("na_den_sp_jde_number"),JDENumItms.getItemByIndex(i).getProperty("id"));
+}
+ 
+//Storing Customer Abbrevations in Dictionary
+string getCustAbbrevs=@"Select na_den_sp_customer_abbrevation,id from NA_DEN_SP_CustomerAbbrevation";
+Item custAbbrevItms=inn.applySQL(getCustAbbrevs);
+Dictionary<string, string> custAbbrevList = new Dictionary<string, string>();
+for(int i=0;i<custAbbrevItms.getItemCount();i++)
+{
+    if(!custAbbrevList.ContainsKey(custAbbrevItms.getItemByIndex(i).getProperty("na_den_sp_customer_abbrevation")))
+    custAbbrevList.Add(custAbbrevItms.getItemByIndex(i).getProperty("na_den_sp_customer_abbrevation"),custAbbrevItms.getItemByIndex(i).getProperty("id"));
+}
+ 
+//Storing ShipToCode in Dictionary
+string getshipToCodes=@"Select na_den_sp_shiptocode,id from NA_DEN_SP_ShipToCode";
+Item shipToCodeItms=inn.applySQL(getshipToCodes);
+Dictionary<string, string> shipToCodeList = new Dictionary<string, string>();
+for(int i=0;i<shipToCodeItms.getItemCount();i++)
+{
+    if(!shipToCodeList.ContainsKey(shipToCodeItms.getItemByIndex(i).getProperty("na_den_sp_shiptocode")))
+    shipToCodeList.Add(shipToCodeItms.getItemByIndex(i).getProperty("na_den_sp_shiptocode"),shipToCodeItms.getItemByIndex(i).getProperty("id"));
+}
+ 
+//Storing Destination numbers and dest abbrevations in Dictionary
+string getdestNumAbbrev=@"Select na_den_sp_dest_abbreviation,id from NA_DEN_SP_Dest_Abbreviation";
+Item destAndAbbrevItms=inn.applySQL(getdestNumAbbrev);
+Dictionary<string, string> destANDAbbrevList = new Dictionary<string, string>();
+for(int i=0;i<destAndAbbrevItms.getItemCount();i++)
+{
+    if(!destANDAbbrevList.ContainsKey(destAndAbbrevItms.getItemByIndex(i).getProperty("na_den_sp_dest_abbreviation")))
+    destANDAbbrevList.Add(destAndAbbrevItms.getItemByIndex(i).getProperty("na_den_sp_dest_abbreviation"),destAndAbbrevItms.getItemByIndex(i).getProperty("id"));
+}
+
+//Storing Destination number
+string getdestNums=@"Select na_den_sp_dest_number,id from NA_DEN_SP_Dest_Number";
+Item destNumItms=inn.applySQL(getdestNums);
+Dictionary<string, string> destNumsList = new Dictionary<string, string>();
+for(int i=0;i<destNumItms.getItemCount();i++)
+{
+    if(!destNumsList.ContainsKey(destNumItms.getItemByIndex(i).getProperty("na_den_sp_dest_number")))
+    destNumsList.Add(destNumItms.getItemByIndex(i).getProperty("na_den_sp_dest_number"),destNumItms.getItemByIndex(i).getProperty("id"));
+}
+ 
+//Storing Rep Numbers in Dictionary
+string getRepNums=@"Select na_den_sp_name,id from NA_DEN_SP_Customer_Rep";
+Item repItms=inn.applySQL(getRepNums);
+Dictionary<string, string> repNumsList = new Dictionary<string, string>();
+for(int i=0;i<repItms.getItemCount();i++)
+{
+    if(!repNumsList.ContainsKey(repItms.getItemByIndex(i).getProperty("na_den_sp_name")))
+    repNumsList.Add(repItms.getItemByIndex(i).getProperty("na_den_sp_name"),repItms.getItemByIndex(i).getProperty("id"));
+}
+
+//Getting Relationship Items
+//Getting All NA_DEN_SP_Dep2CustAndJDERepNum - View 1
+string strView1=@"Select source_id,na_den_sp_customerjdenumber,na_den_sp_customerrepnumber,id From NA_DEN_SP_Dep2CustAndJDERepNum";
+Item relView1Items=inn.applySQL(strView1);
+Dictionary<string, List<string>> relView1ItemsMap = new Dictionary<string, List<string>>();
+Dictionary<string, string> relView1ItemsID = new Dictionary<string, string>();
+for(int i=0;i<relView1Items.getItemCount();i++)
+{
+    if(!relView1ItemsMap.ContainsKey(relView1Items.getItemByIndex(i).getProperty("source_id")))
+    {
+        List< string > newList = new List< string > { relView1Items.getItemByIndex(i).getProperty("na_den_sp_customerjdenumber")+relView1Items.getItemByIndex(i).getProperty("na_den_sp_customerrepnumber") };
+        relView1ItemsMap.Add(relView1Items.getItemByIndex(i).getProperty("source_id"), newList);
+    }
+    else
+    {
+        relView1ItemsMap[relView1Items.getItemByIndex(i).getProperty("source_id")].Add(relView1Items.getItemByIndex(i).getProperty("na_den_sp_customerjdenumber")+relView1Items.getItemByIndex(i).getProperty("na_den_sp_customerrepnumber"));
+    }
+    
+    if(!relView1ItemsID.ContainsKey(relView1Items.getItemByIndex(i).getProperty("source_id")+relView1Items.getItemByIndex(i).getProperty("na_den_sp_customerjdenumber")+relView1Items.getItemByIndex(i).getProperty("na_den_sp_customerrepnumber")))
+    relView1ItemsID.Add(relView1Items.getItemByIndex(i).getProperty("source_id")+relView1Items.getItemByIndex(i).getProperty("na_den_sp_customerjdenumber")+relView1Items.getItemByIndex(i).getProperty("na_den_sp_customerrepnumber"),relView1Items.getItemByIndex(i).getProperty("id"));
+}
+ 
+//Getting All NA_DEN_SP_JDE2AbbANDShipView3 - View 3    
+string strView3=@"Select source_id,na_den_sp_destabbitem,na_den_sp_shiptocode,na_den_sp_dest_number,id From NA_DEN_SP_JDE2AbbANDShipView3";
+Item relView3Items=inn.applySQL(strView3);
+Dictionary<string, List<string>> relView3ItemsMap = new Dictionary<string, List<string>>();
+for(int i=0;i<relView3Items.getItemCount();i++)
+{
+    if(!relView3ItemsMap.ContainsKey(relView3Items.getItemByIndex(i).getProperty("source_id")))
+    {
+        List< string > newList = new List< string > { relView3Items.getItemByIndex(i).getProperty("na_den_sp_destabbitem")+relView3Items.getItemByIndex(i).getProperty("na_den_sp_shiptocode")+relView3Items.getItemByIndex(i).getProperty("na_den_sp_dest_number") };
+        relView3ItemsMap.Add(relView3Items.getItemByIndex(i).getProperty("source_id"), newList);
+    }
+    else
+    {
+        relView3ItemsMap[relView3Items.getItemByIndex(i).getProperty("source_id")].Add(relView3Items.getItemByIndex(i).getProperty("na_den_sp_destabbitem")+relView3Items.getItemByIndex(i).getProperty("na_den_sp_shiptocode")+relView3Items.getItemByIndex(i).getProperty("na_den_sp_dest_number"));
+    }
+} 
+
+int totalCount=0;
+int successCount=0;
+int failedCount=0;
+ 
+int view3TotalCount=0;
+int view3SuccessCount=0;
+int view3FailedCount=0;
+string errorString="";
+ 
+#pragma warning disable
+
+endTime = DateTime.Now;
+timeConsumed = endTime - startTime;
+CCO.Utilities.WriteDebug("NA_DEN_SP_CreatePrereqData_AS400", "Start Time: " + startTime.ToString("hh:mm:ss.fff"));
+CCO.Utilities.WriteDebug("NA_DEN_SP_CreatePrereqData_AS400", "End Time: " + endTime.ToString("hh:mm:ss.fff"));
+CCO.Utilities.WriteDebug("NA_DEN_SP_CreatePrereqData_AS400", "Time Consumed: " + timeConsumed.TotalMilliseconds + " ms");
+CCO.Utilities.WriteDebug("NA_DEN_SP_CreatePrereqData_AS400", "Ended Execution");
+
+
+CCO.Utilities.WriteDebug("NA_DEN_SP_CreatePrereqData_AS400", "adding data");
+startTime = DateTime.Now;
+
+if (department.getItemCount() > 0) 
+{
+    // Traverse through all department items
+    for (var i = 0; i < department.getItemCount(); i++)
+    {
+        var departmentItem = department.getItemByIndex(i);
+ 
+        // Access properties of the department item na_den_sp_name
+        var departmentId = departmentItem.getProperty("id");
+        var departmentName = departmentItem.getProperty("na_den_sp_name");
+        // if(departmentName!="Sales - Urban Mobility" && departmentName!="Sales - EU and Tier 1") continue;
+        
+        var teamID=departmentItem.getProperty("team_id");
+        departmentItem.fetchRelationships("NA_DEN_SP_Department2AS400Dept");
+        Item relationships =departmentItem.getRelationships("NA_DEN_SP_Department2AS400Dept");
+        List<string> salesGroupsList=new List<string>();
+        int count = relationships.getItemCount();
+        for (int j=0; j<count; j++) {
+            Item doc_relationship = relationships.getItemByIndex(j);
+            Item doc_itm = doc_relationship.getRelatedItem();
+            string salesGroup=doc_itm.getProperty("na_den_sp_name");
+            salesGroupsList.Add(salesGroup);
+        }
+        // Convert the list to a formatted string
+        string formattedString = $"('{string.Join("','", salesGroupsList)}')";
+         //Running Queries
+        using(System.Data.SqlClient.SqlConnection cnn = new System.Data.SqlClient.SqlConnection(connectionString)) 
+        {
+            Aras.Server.Security.Identity identityForGrant = Aras.Server.Security.Identity.GetByName(getGrantAccess);
+            bool permissionWasGranted = false;
+            try 
+            {
+                permissionWasGranted = Aras.Server.Security.Permissions.GrantIdentity(identityForGrant);
+                string querySupplierInfo="SELECT * FROM "+targetTableName+" WHERE Sales_Group IN "+formattedString+" AND Business_Type!='TLG'";
+                //Get data from Database
+                var dataAdapter = new System.Data.SqlClient.SqlDataAdapter(querySupplierInfo, cnn);
+                var dataset = new DataSet();
+                dataAdapter.Fill(dataset ,"vwSales_ShipTo");
+                var datatable  = dataset .Tables["vwSales_ShipTo"];
+                
+                //Traverse through data
+                if(datatable.Rows.Count!=0)
+                {
+                    foreach (DataRow row in datatable.Rows)
+                    {
+                        //For JDE Number
+                        string JDENumber=row["JDE_Number"].ToString();
+                        string custName=row["Customer_Name"].ToString();
+                        string busType=row["Business_Type"].ToString();
+                        
+                        //Getting Payment Terms
+                        string payment_Terms="";
+                        if(JDENumsPTs.ContainsKey(JDENumber))
+                        {
+                            payment_Terms=JDENumsPTs[JDENumber];
+                        }
+                        //Adding business type to list so it can update the bus list
+                        if(!busTypesList.Contains(busType))
+                        {
+                            busTypesList.Add(busType);
+                        }
+                        string currCode=row["Currency_Code"].ToString();
+                        string custID="";
+                        if(!string.IsNullOrEmpty(custName))
+                        {
+                            if(customerNamesList.ContainsKey(custName))
+                            {
+                                custID=customerNamesList[custName];
+                            }
+                            else
+                            {
+                                Item custItm=inn.newItem("NA_DEN_SP_CustomerName","add");
+                                custItm.setProperty("na_den_sp_customername",custName);
+                                custItm=custItm.apply();
+                                if(custItm.getItemCount()==1)
+                                {
+                                    custID=custItm.getProperty("id");
+                                    customerNamesList.Add(custName,custID);
+                                }
+                            }
+                        }
+                        
+                        string End_Customer="";
+                        string End_CustomerID="";
+                        if(JDENums_EndCust.ContainsKey(JDENumber))
+                        {
+                            End_Customer=JDENums_EndCust[JDENumber];
+                        }
+                        if(!string.IsNullOrEmpty(End_Customer))
+                        {
+                            string createENDCust=@"<AML><Item type='NA_DEN_SP_End_Customer' action='create'><na_den_sp_name>"+End_Customer+"</na_den_sp_name></Item></AML>";
+                            try
+                            {
+                                Item endCustItm=inn.applyAML(createENDCust);
+                                End_CustomerID=endCustItm.getProperty("id");
+                            }
+                            catch{}
+                        }
+                        // return inn.newResult("My End_Customer - "+End_Customer+", ID - "+End_CustomerID);
+                        string JDEItmID="";
+                        if(JDENumsList.ContainsKey(JDENumber))
+                        {
+                            JDEItmID=JDENumsList[JDENumber];   
+                            StringBuilder JDEItmAML = new StringBuilder("");
+                            JDEItmAML.Append("<AML><Item type='NA_DEN_SP_Customer_JDE' action='edit'  where =\"[NA_DEN_SP_Customer_JDE].na_den_sp_jde_number='"+JDENumber+"'\">");
+                            JDEItmAML.Append("<na_den_sp_customer_name>"+custID+"</na_den_sp_customer_name>");
+                            JDEItmAML.Append("<na_den_sp_bustype>"+busType+"</na_den_sp_bustype>");
+                            JDEItmAML.Append("<na_den_sp_currency>"+currCode+"</na_den_sp_currency>");
+                            JDEItmAML.Append("<na_den_sp_payment_terms>"+payment_Terms+"</na_den_sp_payment_terms>");
+                            JDEItmAML.Append("<na_den_sp_endcustomer>"+End_CustomerID+"</na_den_sp_endcustomer>");
+                            JDEItmAML.Append("</Item></AML>");
+                            
+                            Item JDEItm = inn.applyAML(JDEItmAML.ToString());
+                            
+                        }
+                        else
+                        {
+                            Item JDEItm=inn.newItem("NA_DEN_SP_Customer_JDE","add");
+                            JDEItm.setProperty("na_den_sp_jde_number",JDENumber);
+                            JDEItm.setProperty("na_den_sp_customer_name",custID);
+                            JDEItm.setProperty("na_den_sp_bustype",busType);
+                            JDEItm.setProperty("na_den_sp_currency",currCode);
+                            JDEItm.setProperty("na_den_sp_payment_terms",payment_Terms);
+							if(End_CustomerID!="")
+                            JDEItm.setProperty("na_den_sp_endcustomer",End_CustomerID);
+                            JDEItm=JDEItm.apply();
+                            if(JDEItm.getItemCount()==1)
+                            {
+                                JDEItmID=JDEItm.getProperty("id");
+                                JDENumsList.Add(JDENumber,JDEItmID);
+                            }
+                        }
+ 
+                        //for Customer Abbreviation
+                        string custAbbrevID="";
+                        string custAbbrev=row["Customer_Abbreviation"].ToString();
+                        if(!string.IsNullOrEmpty(custAbbrev))
+                        {
+                            if(custAbbrevList.ContainsKey(custAbbrev))
+                            {
+                                custAbbrevID=custAbbrevList[custAbbrev];
+                            }
+                            else
+                            {
+                                Item custAbbrevItm=inn.newItem("NA_DEN_SP_CustomerAbbrevation","add");
+                                custAbbrevItm.setProperty("na_den_sp_customer_abbrevation",custAbbrev);
+                                custAbbrevItm=custAbbrevItm.apply();
+                                if(custAbbrevItm.getItemCount()==1)
+                                {
+                                    custAbbrevID=custAbbrevItm.getProperty("id");
+                                    custAbbrevList.Add(custAbbrev,custAbbrevID);
+                                }
+                            }
+                        }
+
+                        // for shipTo Code
+                        string shipToCode=row["Ship_To_Code"].ToString();
+                        string shipToCodeItmID="";
+                        if(!string.IsNullOrEmpty(shipToCode))
+                        {
+                            if(shipToCodeList.ContainsKey(shipToCode))
+                            {
+                                shipToCodeItmID=shipToCodeList[shipToCode];
+                                StringBuilder shipToCodeAML = new StringBuilder("");
+                                shipToCodeAML.Append("<AML><Item type='NA_DEN_SP_ShipToCode' action='edit'  where =\"[NA_DEN_SP_ShipToCode].na_den_sp_shiptocode='"+shipToCode+"'\">");
+                                shipToCodeAML.Append("<na_den_sp_customer_abbreviation>"+custAbbrevID+"</na_den_sp_customer_abbreviation>");
+                                shipToCodeAML.Append("</Item></AML>");
+                                
+                                Item shipToCodeItm = inn.applyAML(shipToCodeAML.ToString());
+                            }
+                            else
+                            {
+                                Item shipToCodeItm=inn.newItem("NA_DEN_SP_ShipToCode","add");
+                                shipToCodeItm.setProperty("na_den_sp_shiptocode",shipToCode);
+                                shipToCodeItm.setProperty("na_den_sp_customer_abbreviation",custAbbrevID);
+                                shipToCodeItm=shipToCodeItm.apply();
+                                if(shipToCodeItm.getItemCount()==1)
+                                {
+                                    shipToCodeItmID=shipToCodeItm.getProperty("id");
+                                    shipToCodeList.Add(shipToCode,shipToCodeItmID);
+                                }
+                            }
+                        }
+                        
+                        //For Destination Number
+                        string destNumID="";
+                        string destNum=row["Destination_Number"].ToString();
+                        if(!string.IsNullOrEmpty(destNum))
+                        {
+                            if(destNumsList.ContainsKey(destNum))
+                            {
+                                destNumID=destNumsList[destNum];
+                            }
+                            else
+                            {
+                                Item destNumItm=inn.newItem("NA_DEN_SP_Dest_Number","add");
+                                destNumItm.setProperty("na_den_sp_dest_number",destNum);
+                                destNumItm=destNumItm.apply();
+                                if(destNumItm.getItemCount()==1)
+                                {
+                                    destNumID=destNumItm.getProperty("id");
+                                    destNumsList.Add(destNum,destNumID);
+                                }
+                            }
+                        }
+                        
+                        // Detsination abbrevation 
+                        string destAbbrevItmID="";
+                        string destAbbrev=row["Destination_Abbreviation"].ToString();
+                        if(!string.IsNullOrEmpty(destAbbrev))
+                        {
+                            if(destANDAbbrevList.ContainsKey(destAbbrev))
+                            {
+                                destAbbrevItmID=destANDAbbrevList[destAbbrev];
+                            }
+                            else
+                            {
+                                Item destAbbrevItm=inn.newItem("NA_DEN_SP_Dest_Abbreviation","add");
+                                destAbbrevItm.setProperty("na_den_sp_dest_abbreviation",destAbbrev);
+                                destAbbrevItm=destAbbrevItm.apply();
+                                if(destAbbrevItm.getItemCount()==1)
+                                {
+                                    destAbbrevItmID=destAbbrevItm.getProperty("id");
+                                    destANDAbbrevList.Add(destAbbrev,destAbbrevItmID);
+                                }
+                            }
+                        }
+                        
+                        //For rep Numbers
+                        string repId="";
+                        string repNum=row["Customer_Rep"].ToString();
+                        if(!string.IsNullOrEmpty(repNum))
+                        {
+                            if(repNumsList.ContainsKey(repNum))
+                            {
+                                repId=repNumsList[repNum];
+                            }
+                            else
+                            {
+                                Item repNumItm=inn.newItem("NA_DEN_SP_Customer_Rep","add");
+                                repNumItm.setProperty("na_den_sp_name",repNum);
+                                repNumItm=repNumItm.apply();
+                                if(repNumItm.getItemCount()==1)
+                                {
+                                    repId=repNumItm.getProperty("id");
+                                    repNumsList.Add(repNum,repId);
+                                }
+                            }
+                        }
+                        
+                        if(!relView1ItemsMap.TryGetValue( departmentId , out List< string > testHeadTempList))
+                        {
+                            relView1ItemsMap.Add(departmentId, new List<string>());
+                        }
+                        
+                        //Adding View 1
+                        if(relView1ItemsMap.TryGetValue( departmentId , out List< string > headTempList))
+                        {
+                            if(headTempList.Contains(JDEItmID+repId))
+                            {
+                                string new_jde_rep_itmID="";
+                                
+                                if(relView1ItemsID.ContainsKey(departmentId+JDEItmID+repId))
+                                new_jde_rep_itmID=relView1ItemsID[departmentId+JDEItmID+repId];
+
+                                if(!relView3ItemsMap.TryGetValue( new_jde_rep_itmID , out List< string > testTempList))
+                                {
+                                    relView3ItemsMap.Add(new_jde_rep_itmID, new List<string>());
+                                }
+                                
+                                if(relView3ItemsMap.TryGetValue( new_jde_rep_itmID , out List< string > tempList2))
+                                {
+                                    if(!tempList2.Contains(destAbbrevItmID+shipToCodeItmID+destNumID))
+                                    {
+                                        try
+                                        {
+                                            Item new_CustAbbrev_ShipTo_itm=inn.newItem("NA_DEN_SP_JDE2AbbANDShipView3","add");
+                                            new_CustAbbrev_ShipTo_itm.setProperty("source_id",new_jde_rep_itmID);
+                                            new_CustAbbrev_ShipTo_itm.setProperty("na_den_sp_destabbitem",destAbbrevItmID);
+                                            new_CustAbbrev_ShipTo_itm.setProperty("na_den_sp_shiptocode",shipToCodeItmID);
+                                            new_CustAbbrev_ShipTo_itm.setProperty("na_den_sp_dest_number",destNumID);
+                                            new_CustAbbrev_ShipTo_itm.setProperty("team_id",teamID);
+                                            new_CustAbbrev_ShipTo_itm=new_CustAbbrev_ShipTo_itm.apply();
+                                            relView3ItemsMap[new_jde_rep_itmID].Add(destAbbrevItmID+shipToCodeItmID+destNumID);
+                                        }
+                                        catch
+                                        {
+                                            view3FailedCount++;
+                                        }
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                try
+                                {
+                                    Item new_jde_rep_itm=inn.newItem("NA_DEN_SP_Dep2CustAndJDERepNum","add");
+                                    new_jde_rep_itm.setProperty("source_id",departmentId);
+                                    new_jde_rep_itm.setProperty("na_den_sp_customerjdenumber",JDEItmID);
+                                    new_jde_rep_itm.setProperty("na_den_sp_customerrepnumber",repId);
+                                    new_jde_rep_itm.setProperty("team_id",teamID);
+                                    new_jde_rep_itm=new_jde_rep_itm.apply();
+                                    
+                                    if(new_jde_rep_itm.getItemCount()==1)
+                                    {
+                                        string new_jde_rep_itmID=new_jde_rep_itm.getProperty("id");
+                                        relView1ItemsMap[departmentId].Add(JDEItmID+repId);
+                                        relView1ItemsID.Add(departmentId+JDEItmID+repId,new_jde_rep_itmID);
+                                        
+                                        if(!relView3ItemsMap.TryGetValue( new_jde_rep_itmID , out List< string > testTempList))
+                                        {
+                                            relView3ItemsMap.Add(new_jde_rep_itmID, new List<string>());
+                                        }
+                                
+                                        if(relView3ItemsMap.TryGetValue( new_jde_rep_itmID , out List< string > tempList2))
+                                        {
+                                            if(!tempList2.Contains(destAbbrevItmID+shipToCodeItmID+destNumID))
+                                            {
+                                                try
+                                                {
+                                                    Item new_CustAbbrev_ShipTo_itm=inn.newItem("NA_DEN_SP_JDE2AbbANDShipView3","add");
+                                                    new_CustAbbrev_ShipTo_itm.setProperty("source_id",new_jde_rep_itmID);
+                                                    new_CustAbbrev_ShipTo_itm.setProperty("na_den_sp_destabbitem",destAbbrevItmID);
+                                                    new_CustAbbrev_ShipTo_itm.setProperty("na_den_sp_shiptocode",shipToCodeItmID);
+                                                    new_CustAbbrev_ShipTo_itm.setProperty("na_den_sp_dest_number",destNumID);
+                                                    new_CustAbbrev_ShipTo_itm.setProperty("team_id",teamID);
+                                                    new_CustAbbrev_ShipTo_itm=new_CustAbbrev_ShipTo_itm.apply();
+                                                    relView3ItemsMap[new_jde_rep_itmID].Add(destAbbrevItmID+shipToCodeItmID+destNumID);
+                                                }
+                                                catch
+                                                {
+                                                    view3FailedCount++;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                catch
+                                {
+                                    failedCount++;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception) 
+            {
+                throw;
+            } 
+            finally
+            {
+                if (permissionWasGranted) {
+                    Aras.Server.Security.Permissions.RevokeIdentity(identityForGrant);
+                }
+            }
+        }
+        //calculate success Counts
+        departmentItem.fetchRelationships("NA_DEN_SP_Dep2CustAndJDERepNum");
+        Item view1Rels =departmentItem.getRelationships("NA_DEN_SP_Dep2CustAndJDERepNum");
+        successCount+=view1Rels.getItemCount();
+        for(int j=0;j<view1Rels.getItemCount();j++)
+        {
+            Item view1Itm=view1Rels.getItemByIndex(j);
+            view1Itm.fetchRelationships("NA_DEN_SP_JDE2AbbANDShipView3");
+            Item view3Rels =view1Itm.getRelationships("NA_DEN_SP_JDE2AbbANDShipView3");
+            view3SuccessCount+=view3Rels.getItemCount();
+        }
+        // break;
+    }
+}
+
+endTime = DateTime.Now;
+timeConsumed = endTime - startTime;
+CCO.Utilities.WriteDebug("NA_DEN_SP_CreatePrereqData_AS400", "Start Time: " + startTime.ToString("hh:mm:ss.fff"));
+CCO.Utilities.WriteDebug("NA_DEN_SP_CreatePrereqData_AS400", "End Time: " + endTime.ToString("hh:mm:ss.fff"));
+CCO.Utilities.WriteDebug("NA_DEN_SP_CreatePrereqData_AS400", "Time Consumed: " + timeConsumed.TotalMilliseconds + " ms");
+CCO.Utilities.WriteDebug("NA_DEN_SP_CreatePrereqData_AS400", "Ended Execution");
+ 
+ 
+//Calculate total Counts
+totalCount=successCount+failedCount;
+view3TotalCount=view3SuccessCount+view3FailedCount;
+ 
+//Updating the busType List
+Item listItm=inn.newItem("List","get");
+listItm.setProperty("name","NA_DEN_SP_BusTypeList");
+listItm=listItm.apply();
+listItm.fetchRelationships("Value");
+Item listValues =listItm.getRelationships("Value");
+List<string> tempList=new List<string>();
+for(int i=0;i<listValues.getItemCount();i++)
+{
+    string tempValue=listValues.getItemByIndex(i).getProperty("value");
+    tempList.Add(tempValue);
+}
+ 
+if(listItm.getItemCount()==1)
+{
+    string listItmID=listItm.getProperty("id");
+    foreach (var listValue in busTypesList)
+    {
+        if(!tempList.Contains(listValue))
+        {
+            Item newListValueItm=inn.newItem("Value","add");
+            newListValueItm.setProperty("source_id",listItmID);
+            newListValueItm.setProperty("label",listValue);
+            newListValueItm.setProperty("value",listValue);
+            newListValueItm=newListValueItm.apply();
+            if(newListValueItm.getItemCount()==1)
+            {
+                tempList.Add(listValue);
+            }
+        }
+    }
+}
+ 
+return inn.newResult("View 1 \nTotal Count: "+ totalCount + ", Success Count: " + successCount + ", Failed Count: " + failedCount+"\nView 3 \nTotal Count: "+ view3TotalCount + ", Success Count: " + view3SuccessCount + ", Failed Count: " + view3FailedCount);
+This code takes almost 1.40 sec to execute -> optimize it to take less than 1 min 
